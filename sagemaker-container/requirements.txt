@@ -1,0 +1,5 @@
+onnxruntime-gpu==1.18.1
+numpy
+sagemaker-inference
+transformers==4.40.0   # only if you decode/generate inside container
+flask
