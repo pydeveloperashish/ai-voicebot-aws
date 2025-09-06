@@ -19,7 +19,7 @@ class Predictor:
 model = None
 
 def model_fn(model_dir):
-    model_path = os.path.join(model_dir, "model-int8.onnx")
+    model_path = os.path.join(model_dir, "content/phi2-onnx/model-int8.onnx")
     predictor = Predictor(model_path)
 
     # 🔥 Warmup: run a fake inference to trigger TensorRT engine build
