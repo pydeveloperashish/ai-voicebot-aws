@@ -1,23 +1,22 @@
-# Use CPU base for quick testing. Replace with GPU base if you need CUDA/TRT.
-FROM python:3.11-slim
+# Dockerfile (GPU-friendly, CUDA 11.4)
+FROM nvidia/cuda:11.4.4-cudnn8-runtime-ubuntu20.04
 
-# Install small system deps
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    ca-certificates \
+    build-essential wget ca-certificates git python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/program
 
-# Copy app code and requirements
+# copy app
 COPY inference.py server.py requirements.txt /opt/program/
 
-# Install python deps
-RUN pip install --no-cache-dir -r requirements.txt
+# install Python deps -- prefer a wheel for onnxruntime-gpu that matches cuda11.4
+RUN pip3 install --upgrade pip
+# If a matching onnxruntime-gpu wheel is available on PyPI for cuda11.4, requirements.txt is fine.
+# Otherwise you'll need to install a specific wheel or build ONNX Runtime with CUDA/TensorRT support.
+RUN pip3 install --no-cache-dir -r requirements.txt
 
-# Expose the default SageMaker port
-EXPOSE 8080
-
-# SageMaker expects the server process to run as PID 1 and keep running.
 ENV MODEL_DIR=/opt/ml/model
-CMD ["python", "/opt/program/server.py"]
+EXPOSE 8080
+CMD ["python3", "/opt/program/server.py"]
