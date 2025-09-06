@@ -1,4 +1,4 @@
-# create_sagemaker.py  — idempotent deploy script (enhanced)
+# create_sagemaker.py  — idempotent deploy script (with createModel & createEndpointConfiguration)
 import boto3
 import botocore
 import time
@@ -31,7 +31,6 @@ def exists_model(name):
         sm.describe_model(ModelName=name)
         return True
     except botocore.exceptions.ClientError as e:
-        # SageMaker raises ValidationException when resource not found for describe_model
         if e.response["Error"]["Code"] in ("ValidationException", "ResourceNotFound"):
             return False
         raise
@@ -131,44 +130,66 @@ def tail_cloudwatch_logs_for_endpoint(name, limit_streams=2, lines=200):
         print("Error fetching CloudWatch logs:", e)
 
 
+# --- New explicit createModel and createEndpointConfiguration functions ---
+
+def createModel(name, image_uri, model_data_url, role):
+    """
+    Create a SageMaker Model resource that references the given image & model data.
+    Idempotent wrapper: raises if underlying API fails for other reasons.
+    """
+    print(f"Creating model resource {name} -> image: {image_uri}, model data: {model_data_url}")
+    try:
+        sm.create_model(
+            ModelName=name,
+            PrimaryContainer={"Image": image_uri, "ModelDataUrl": model_data_url},
+            ExecutionRoleArn=role,
+        )
+        print("Model created:", name)
+    except botocore.exceptions.ClientError as e:
+        # propagate meaningful errors, but if model already exists let caller handle with exists_model check
+        print("createModel error:", e)
+        raise
+
+
+def createEndpointConfiguration(name, model_name, instance_type="ml.g5.xlarge", initial_instance_count=1):
+    """
+    Create an endpoint configuration with a single production variant.
+    Idempotent wrapper: raises on unexpected errors.
+    """
+    print(f"Creating endpoint config {name} for model {model_name}")
+    try:
+        sm.create_endpoint_config(
+            EndpointConfigName=name,
+            ProductionVariants=[
+                {
+                    "VariantName": "AllTraffic",
+                    "ModelName": model_name,
+                    "InstanceType": instance_type,
+                    "InitialInstanceCount": initial_instance_count,
+                }
+            ],
+        )
+        print("Endpoint config created:", name)
+    except botocore.exceptions.ClientError as e:
+        print("createEndpointConfiguration error:", e)
+        raise
+
+
+# --- Ensure model & endpoint config exist (uses the explicit functions above) ---
 def ensure_model_and_config():
     # create model if missing
     if exists_model(model_name):
         print("Model already exists — skipping create_model")
     else:
-        print("Creating model:", model_name)
-        try:
-            sm.create_model(
-                ModelName=model_name,
-                PrimaryContainer={"Image": ecr_image, "ModelDataUrl": s3_model_path},
-                ExecutionRoleArn=role_arn,
-            )
-            print("Model created:", model_name)
-        except botocore.exceptions.ClientError as e:
-            print("Error creating model:", e)
-            raise
+        print("Model missing; creating via createModel()")
+        createModel(model_name, ecr_image, s3_model_path, role_arn)
 
     # create endpoint config if missing
     if exists_endpoint_config(endpoint_config_name):
         print("Endpoint config already exists — skipping create_endpoint_config")
     else:
-        print("Creating endpoint config:", endpoint_config_name)
-        try:
-            sm.create_endpoint_config(
-                EndpointConfigName=endpoint_config_name,
-                ProductionVariants=[
-                    {
-                        "VariantName": "AllTraffic",
-                        "ModelName": model_name,
-                        "InstanceType": "ml.g5.xlarge",
-                        "InitialInstanceCount": 1,
-                    }
-                ],
-            )
-            print("Endpoint config created:", endpoint_config_name)
-        except botocore.exceptions.ClientError as e:
-            print("Error creating endpoint config:", e)
-            raise
+        print("Endpoint config missing; creating via createEndpointConfiguration()")
+        createEndpointConfiguration(endpoint_config_name, model_name, instance_type="ml.g5.xlarge", initial_instance_count=1)
 
 
 def reconcile_endpoint():
