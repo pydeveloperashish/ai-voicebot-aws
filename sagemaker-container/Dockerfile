@@ -19,4 +19,5 @@ RUN pip3 install --no-cache-dir -r requirements.txt
 
 ENV MODEL_DIR=/opt/ml/model
 EXPOSE 8080
-CMD ["python3", "/opt/program/server.py"]
+# CMD ["python3", "/opt/program/server.py"]
+ENTRYPOINT ["python3", "/opt/program/server.py"]
