@@ -1,9 +1,10 @@
-# create_sagemaker.py  — idempotent deploy script (with createModel & createEndpointConfiguration)
+# create_sagemaker.py  — idempotent deploy script (creates versioned Model & EndpointConfig and updates endpoint)
 import boto3
 import botocore
 import time
 import sys
 import json
+import datetime
 
 # --- Config (fill these) ---
 region = "ap-south-1"
@@ -11,6 +12,7 @@ account_id = "170722810688"
 ecr_image = f"{account_id}.dkr.ecr.{region}.amazonaws.com/phi2-trt:latest"
 s3_model_path = "s3://voiceai-s3-bucket-03/phi2-onnx-int8-model/model.tar.gz"
 
+# base logical names (we will version these on each deploy)
 model_name = "phi2-trt-model"
 endpoint_config_name = "phi2-trt-config"
 endpoint_name = "phi2-trt-endpoint"
@@ -131,7 +133,6 @@ def tail_cloudwatch_logs_for_endpoint(name, limit_streams=2, lines=200):
 
 
 # --- New explicit createModel and createEndpointConfiguration functions ---
-
 def createModel(name, image_uri, model_data_url, role):
     """
     Create a SageMaker Model resource that references the given image & model data.
@@ -146,7 +147,6 @@ def createModel(name, image_uri, model_data_url, role):
         )
         print("Model created:", name)
     except botocore.exceptions.ClientError as e:
-        # propagate meaningful errors, but if model already exists let caller handle with exists_model check
         print("createModel error:", e)
         raise
 
@@ -154,7 +154,6 @@ def createModel(name, image_uri, model_data_url, role):
 def createEndpointConfiguration(name, model_name, instance_type="ml.g5.xlarge", initial_instance_count=1):
     """
     Create an endpoint configuration with a single production variant.
-    Idempotent wrapper: raises on unexpected errors.
     """
     print(f"Creating endpoint config {name} for model {model_name}")
     try:
@@ -175,43 +174,46 @@ def createEndpointConfiguration(name, model_name, instance_type="ml.g5.xlarge", 
         raise
 
 
-# --- Ensure model & endpoint config exist (uses the explicit functions above) ---
+# --- Versioning helper and updated ensure_model_and_config() ---
+def _versioned(base_name):
+    ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return f"{base_name}-{ts}"
+
+
 def ensure_model_and_config():
-    # create model if missing
-    if exists_model(model_name):
-        print("Model already exists — skipping create_model")
-    else:
-        print("Model missing; creating via createModel()")
-        createModel(model_name, ecr_image, s3_model_path, role_arn)
+    """
+    Always create a new versioned Model and EndpointConfig and return their names:
+    (new_model_name, new_endpoint_config_name)
+    """
+    new_model_name = _versioned(model_name)
+    print("Creating new versioned model:", new_model_name)
+    createModel(new_model_name, ecr_image, s3_model_path, role_arn)
 
-    # create endpoint config if missing
-    if exists_endpoint_config(endpoint_config_name):
-        print("Endpoint config already exists — skipping create_endpoint_config")
-    else:
-        print("Endpoint config missing; creating via createEndpointConfiguration()")
-        createEndpointConfiguration(endpoint_config_name, model_name, instance_type="ml.g5.xlarge", initial_instance_count=1)
+    new_endpoint_config_name = _versioned(endpoint_config_name)
+    print("Creating new versioned endpoint config:", new_endpoint_config_name)
+    createEndpointConfiguration(new_endpoint_config_name, new_model_name, instance_type="ml.g5.xlarge", initial_instance_count=1)
+
+    return new_model_name, new_endpoint_config_name
 
 
-def reconcile_endpoint():
+def reconcile_endpoint(new_endpoint_config_name):
+    """
+    Update existing endpoint to use new_endpoint_config_name (preferred), or create endpoint if missing.
+    Waits for InService and tails logs on failure.
+    """
     print("🚀 Reconciling endpoint state for:", endpoint_name)
-    # If exists, check status & react accordingly
     if exists_endpoint(endpoint_name):
         desc = sm.describe_endpoint(EndpointName=endpoint_name)
         status = desc.get("EndpointStatus")
         print("Existing endpoint status:", status)
-
-        if status == "InService":
-            print("✅ Endpoint already InService. Nothing to do.")
-            return "InService"
 
         if status in ("Creating", "Updating"):
             print("Endpoint is currently", status, " — waiting until complete or fail.")
             final = wait_for_endpoint_status(endpoint_name, target_statuses=("InService",), fail_statuses=("Failed",), timeout_minutes=CREATE_TIMEOUT_MINUTES)
             if final == "InService":
                 print("✅ Endpoint became InService.")
-                return "InService"
             else:
-                print("Endpoint ended in status:", final, " — will delete and recreate.")
+                print("Endpoint ended in status:", final, " — deleting and recreating.")
                 delete_endpoint_safe(endpoint_name)
 
         if status == "Failed":
@@ -219,15 +221,22 @@ def reconcile_endpoint():
             print("FailureReason:", desc.get("FailureReason"))
             delete_endpoint_safe(endpoint_name)
 
-        # other statuses fall through to create
-
-    # Create endpoint
-    print("Creating endpoint:", endpoint_name)
-    try:
-        sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=endpoint_config_name)
-    except botocore.exceptions.ClientError as e:
-        print("Error creating endpoint:", e)
-        raise
+        # If endpoint still exists (InService or other), update it to point to the new config
+    # If endpoint exists now, update; otherwise create
+    if exists_endpoint(endpoint_name):
+        print("Updating endpoint to use new config:", new_endpoint_config_name)
+        try:
+            sm.update_endpoint(EndpointName=endpoint_name, EndpointConfigName=new_endpoint_config_name)
+        except botocore.exceptions.ClientError as e:
+            print("Error updating endpoint:", e)
+            raise
+    else:
+        print("Creating endpoint:", endpoint_name)
+        try:
+            sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=new_endpoint_config_name)
+        except botocore.exceptions.ClientError as e:
+            print("Error creating endpoint:", e)
+            raise
 
     print("⏳ Waiting for endpoint to be InService...")
     final_status = wait_for_endpoint_status(endpoint_name, target_statuses=("InService",), fail_statuses=("Failed",), timeout_minutes=CREATE_TIMEOUT_MINUTES)
@@ -245,10 +254,11 @@ def reconcile_endpoint():
 
 if __name__ == "__main__":
     try:
-        print("📦 Ensuring model and endpoint config exist...")
-        ensure_model_and_config()
+        print("📦 Creating a new versioned model & endpoint config...")
+        new_model_name, new_endpoint_config_name = ensure_model_and_config()
 
-        result = reconcile_endpoint()
+        # Reconcile endpoint to use the new endpoint config (create or update)
+        result = reconcile_endpoint(new_endpoint_config_name)
         print("Done. Result:", result)
     except Exception as e:
         print("Deployment failed with exception:", e)
