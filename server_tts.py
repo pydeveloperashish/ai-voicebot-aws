@@ -55,7 +55,7 @@ def make_streamer():
             local_chunks.append(b)
 
     # Headless: no audio device
-    stream = TextToAudioStream(engine, muted=False)
+    stream = TextToAudioStream(engine, muted=True)
     return stream, local_chunks, on_chunk
 
 @app.post("/say")
