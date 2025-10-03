@@ -1,2 +1,4 @@
 docker-commands.txt
 flow.txt
+.env
+rag-bedrock-pem.pem
