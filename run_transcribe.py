@@ -131,7 +131,12 @@ class LiveGenerator:
             # Send user's question to browser
             await self.send_user_question(prompt)
             
-            payload = {"input_texts": [f"Question: {prompt}\nAnswer:"], "streaming": True, "enable_tts": True, "temperature": 0.7, "top_p": 0.9}
+            payload = {"input_texts": [f"Question: {prompt}\nAnswer:"], 
+                        "streaming": True, 
+                        "enable_tts": True, 
+                        "temperature": 0.1, 
+                        "top_p": 0.9,
+                        "stop_sequences": ["Question:", "\nQ:", "\n\n"]}
             headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
             async with self.session.post(self.llm_url, headers=headers, json=payload) as resp:
                 if resp.status != 200:
